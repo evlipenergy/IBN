@@ -32,7 +32,7 @@ def extract_from_pil_images(images: list, api_key: str) -> list:
     import google.generativeai as genai
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name="gemini-2.5-flash-preview-04-17")
+    model = genai.GenerativeModel(model_name="gemini-2.5-flash")
 
     response = model.generate_content([EXTRACTION_PROMPT] + images)
 
