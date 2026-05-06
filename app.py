@@ -9,6 +9,7 @@ import os
 import config
 import pdf_filler
 import gemini_extractor
+import pdf_data_extractor
 
 # ---------------------------------------------------------------------------
 # Seiten-Konfiguration
@@ -82,6 +83,26 @@ if "api_key" not in st.session_state:
     # Fallback: leerer String → manuelle Eingabe im UI
     st.session_state.api_key = st.secrets.get("GEMINI_API_KEY", "")
 
+if "blanko_pdf_bytes" not in st.session_state:
+    # Blanko-PDF aus assets laden falls vorhanden, sonst None
+    if os.path.exists(config.BLANKO_PDF):
+        with open(config.BLANKO_PDF, "rb") as _f:
+            st.session_state.blanko_pdf_bytes = _f.read()
+    else:
+        st.session_state.blanko_pdf_bytes = None
+
+
+def set_form_fields(data: dict):
+    """
+    Schreibt Werte sowohl in session_state.form als auch in die
+    Widget-Keys (fi_XXX), damit die Felder im Formular sofort aktualisiert werden.
+    """
+    for key, value in data.items():
+        st.session_state.form[key] = value
+        widget_key = f"fi_{key}"
+        if widget_key in st.session_state:
+            st.session_state[widget_key] = value
+
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
@@ -92,6 +113,24 @@ tab1, tab2 = st.tabs(["📷  Fotos & Extraktion", "📋  IBN-Formular"])
 # TAB 1 – Fotos & Extraktion
 # ===========================================================================
 with tab1:
+
+    # Blanko-PDF Upload
+    if not st.session_state.blanko_pdf_bytes:
+        with st.expander("📄 Blanko-PDF Vorlage hochladen", expanded=True):
+            st.warning("Blanko-PDF fehlt. Einmalig hochladen – wird für diese Sitzung gespeichert.")
+            uploaded_blanko = st.file_uploader(
+                "Vaillant_IBN_blanko_offline.pdf hochladen",
+                type=["pdf"],
+                key="blanko_upload",
+            )
+            if uploaded_blanko:
+                st.session_state.blanko_pdf_bytes = uploaded_blanko.read()
+                st.success("✅ Blanko-PDF gespeichert.")
+                st.rerun()
+    else:
+        st.success("📄 Blanko-PDF Vorlage ist hinterlegt.", icon="✅")
+
+    st.divider()
 
     # API-Key – aus Secrets (Cloud) oder manuelle Eingabe (lokal)
     if st.session_state.api_key:
@@ -125,6 +164,47 @@ with tab1:
         for i, f in enumerate(uploaded_files):
             with cols[i % 5]:
                 st.image(f, caption=f.name, use_container_width=True)
+
+    st.divider()
+
+    # PDF-Dokumente für Kundendaten
+    st.subheader("📄 Projektdokumente (PDF)")
+    st.caption("Auftragsbestätigung, Angebot oder Lieferschein hochladen → Kundendaten werden automatisch ins Formular übertragen")
+
+    uploaded_pdfs = st.file_uploader(
+        "PDFs hochladen",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="pdf_upload",
+        label_visibility="collapsed",
+    )
+
+    if uploaded_pdfs:
+        st.write(f"📎 {len(uploaded_pdfs)} PDF(s) geladen: " + ", ".join(f.name for f in uploaded_pdfs))
+
+    if st.button("📋  Kundendaten aus PDFs extrahieren (Gemini)",
+                 type="secondary", disabled=not uploaded_pdfs):
+        if not st.session_state.api_key:
+            st.error("Bitte zuerst den Gemini API-Key eingeben.")
+        else:
+            with st.spinner("Gemini liest die Projektdokumente…"):
+                try:
+                    pdf_bytes_list = [f.read() for f in uploaded_pdfs]
+                    extracted = pdf_data_extractor.extract_from_pdf_bytes(
+                        pdf_bytes_list, st.session_state.api_key
+                    )
+                    if extracted:
+                        # Anrede Radio-Button separat (Widget-Key ist "fi_anrede", Wert "Herr"/"Frau")
+                        if "EigentuemerAnrede" in extracted:
+                            anrede_val = extracted.pop("EigentuemerAnrede")
+                            st.session_state.form["EigentuemerAnrede"] = anrede_val
+                            st.session_state["fi_anrede"] = "Herr" if anrede_val == "/1" else "Frau"
+                        set_form_fields(extracted)
+                        st.success(f"✅ {len(extracted)} Felder übertragen → Tab 'IBN-Formular' prüfen.")
+                    else:
+                        st.warning("Keine verwertbaren Daten gefunden. Bitte Felder manuell ausfüllen.")
+                except Exception as e:
+                    st.error(f"Fehler: {e}")
 
     st.divider()
 
@@ -180,14 +260,16 @@ with tab1:
         st.divider()
         if st.button("✅  Zuordnung ins Formular übernehmen", type="primary"):
             count = 0
+            updates = {}
             for i, dev in enumerate(st.session_state.extracted_devices):
                 role = st.session_state.role_assignments[i]
                 if role == "– ignorieren –" or role not in config.ROLE_TO_FIELD:
                     continue
                 desc_field, sn_field = config.ROLE_TO_FIELD[role]
-                st.session_state.form[desc_field] = dev.get("modell") or ""
-                st.session_state.form[sn_field]   = dev.get("seriennummer") or ""
+                updates[desc_field] = dev.get("modell") or ""
+                updates[sn_field]   = dev.get("seriennummer") or ""
                 count += 1
+            set_form_fields(updates)
             st.success(f"✅ {count} Gerät(e) ins Formular übertragen → jetzt Tab 'IBN-Formular' öffnen.")
 
 
@@ -329,15 +411,16 @@ with tab2:
     col_btn, col_reset = st.columns([2, 1])
 
     with col_btn:
-        if not os.path.exists(config.BLANKO_PDF):
-            st.error(
-                f"Blanko-PDF nicht gefunden: `{config.BLANKO_PDF}`\n\n"
-                "Bitte `Vaillant_IBN_blanko_offline.pdf` in den Ordner `assets/` legen."
-            )
+        if not st.session_state.blanko_pdf_bytes:
+            st.error("Blanko-PDF fehlt → bitte im Tab 'Fotos & Extraktion' oben hochladen.")
         else:
             try:
+                import io as _io
                 data = dict(f)
-                pdf_bytes = pdf_filler.fill_ibn_bytes(config.BLANKO_PDF, data)
+                data["EigentuemerAnrede"] = st.session_state.form.get("EigentuemerAnrede", "/1")
+                pdf_bytes = pdf_filler.fill_ibn_bytes_from_bytes(
+                    st.session_state.blanko_pdf_bytes, data
+                )
                 nachname  = f.get("EigentuemerName", "").strip()
                 filename  = f"IBN_{nachname}.pdf" if nachname else "IBN_Protokoll.pdf"
 
