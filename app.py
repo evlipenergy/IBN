@@ -78,7 +78,9 @@ if "role_assignments" not in st.session_state:
     st.session_state.role_assignments = []
 
 if "api_key" not in st.session_state:
-    st.session_state.api_key = ""
+    # Automatisch aus Streamlit Secrets laden (Streamlit Cloud)
+    # Fallback: leerer String → manuelle Eingabe im UI
+    st.session_state.api_key = st.secrets.get("GEMINI_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Tabs
@@ -91,17 +93,21 @@ tab1, tab2 = st.tabs(["📷  Fotos & Extraktion", "📋  IBN-Formular"])
 # ===========================================================================
 with tab1:
 
-    # API-Key
-    with st.expander("🔑 Gemini API-Key", expanded=not bool(st.session_state.api_key)):
-        api_input = st.text_input(
-            "API-Key",
-            value=st.session_state.api_key,
-            type="password",
-            placeholder="AIza…",
-        )
-        if st.button("Speichern", key="save_key"):
-            st.session_state.api_key = api_input
-            st.success("API-Key gespeichert.")
+    # API-Key – aus Secrets (Cloud) oder manuelle Eingabe (lokal)
+    if st.session_state.api_key:
+        st.success("🔑 Gemini API-Key ist hinterlegt.", icon="✅")
+    else:
+        with st.expander("🔑 Gemini API-Key eingeben", expanded=True):
+            st.info("Lokal: API-Key hier eingeben. Auf Streamlit Cloud wird er automatisch aus den Secrets geladen.")
+            api_input = st.text_input(
+                "API-Key",
+                value="",
+                type="password",
+                placeholder="AIza…",
+            )
+            if st.button("Speichern", key="save_key"):
+                st.session_state.api_key = api_input
+                st.rerun()
 
     st.divider()
 
